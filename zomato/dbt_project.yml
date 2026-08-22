@@ -33,5 +33,3 @@ models:
   zomato:
     staging: { +materialized: view, +schema: staging}
     marts: { +materialized: table, +schema: marts}
-  snapshot:
-    zomato: { +materialized: snapshot, +schema: snapshot}
