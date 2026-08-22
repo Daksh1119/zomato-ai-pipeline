@@ -207,24 +207,18 @@ def get_embedding_model():
 
 SAMPLE_N = 1000
 
-@st.cache_resource
-def get_total_review_count():
-    conn = get_snowflake_connection(schema="RAW")
-    result = conn.cursor().execute("SELECT COUNT(*) FROM ZOMATO.STAGING.STG_REVIEWS").fetchone()
-    conn.close()
-    return result[0]
-
 def read_reviews_from_snowflake():
     conn = get_snowflake_connection(schema="RAW")
-    query = f"""
+    cur = conn.cursor()
+    total = cur.execute("SELECT COUNT(*) FROM ZOMATO.STAGING.STG_REVIEWS").fetchone()[0]
+    df = cur.execute(f"""
         SELECT REVIEW_ID, CITY, RATING, COMMENT
         FROM ZOMATO.STAGING.STG_REVIEWS
         SAMPLE ({SAMPLE_N} ROWS)
-    """
-    df = conn.cursor().execute(query).fetch_pandas_all()
+    """).fetch_pandas_all()
     conn.close()
     df.columns = [col.lower() for col in df.columns]
-    return df
+    return df, total
 
 def embed_texts(texts):
     model = get_embedding_model()
@@ -238,14 +232,16 @@ def load_reviews():
     if os.path.exists(CACHE_FILE) and os.path.exists(MATRIX_FILE):
         df = pd.read_parquet(CACHE_FILE)
         matrix = np.load(MATRIX_FILE)
-        return df, matrix
+        total = int(df.attrs.get("total_count", len(df)))
+        return df, matrix, total
 
-    df = read_reviews_from_snowflake()
+    df, total = read_reviews_from_snowflake()
     matrix = embed_texts(df['comment'].tolist())
     np.save(MATRIX_FILE, matrix)
     df_meta = df[['review_id', 'city', 'rating', 'comment']]
+    df_meta.attrs["total_count"] = total
     df_meta.to_parquet(CACHE_FILE, index=False)
-    return df_meta, matrix
+    return df_meta, matrix, total
 
 def find_similar_reviews(question, df, matrix, top_k=TOP_K):
     question_vector = embed_texts([question])[0]
@@ -325,8 +321,7 @@ nav_tabs = st.tabs(["Review Intelligence (RAG)", "SQL Data Analyst (Text-to-SQL)
 # Tab 1: Review Intelligence (RAG)
 # -----------------------------------------------------------------------------
 with nav_tabs[0]:
-    review_df, review_matrix = load_reviews()
-    total_reviews = get_total_review_count()
+    review_df, review_matrix, total_reviews = load_reviews()
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
