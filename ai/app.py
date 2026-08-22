@@ -190,7 +190,6 @@ Rules:
 {SCHEMA}
 """
 
-@st.cache_resource
 def get_snowflake_connection(schema="MARTS"):
     return snowflake.connector.connect(
         account=os.getenv("SNOWFLAKE_ACCOUNT"),
@@ -212,6 +211,7 @@ SAMPLE_N = 1000
 def get_total_review_count():
     conn = get_snowflake_connection(schema="RAW")
     result = conn.cursor().execute("SELECT COUNT(*) FROM ZOMATO.STAGING.STG_REVIEWS").fetchone()
+    conn.close()
     return result[0]
 
 def read_reviews_from_snowflake():
@@ -305,8 +305,9 @@ def is_safe_sql(sql):
 
 def run_sql_query(sql):
     conn = get_snowflake_connection(schema="MARTS")
-    cursor = conn.cursor()
-    return cursor.execute(sql).fetch_pandas_all()
+    df = conn.cursor().execute(sql).fetch_pandas_all()
+    conn.close()
+    return df
 
 # -----------------------------------------------------------------------------
 # Main Header & Tab Navigation
