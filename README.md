@@ -1,5 +1,7 @@
 # Zomato Data Engineering Pipeline
 
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://zomato-ai-pipeline.streamlit.app)
+
 An end-to-end batch data pipeline built on Snowflake, Apache Airflow 3, dbt, and large language models. Raw food-delivery data is ingested from cloud storage, transformed through a dimensional model in Snowflake, enriched with AI-generated sentiment analysis, and exposed through a conversational analytics application.
 
 ---
