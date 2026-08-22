@@ -114,10 +114,11 @@ st.markdown("""
 load_dotenv()
 
 CHAT_MODEL = "openai/gpt-oss-20b"
-NEW_REVIEWS = 500
 TOP_K = 5
 TEMPERATURE = 0.2
-CACHE_FILE = os.path.join(os.path.dirname(__file__), "review_embeddings.parquet") if os.path.exists(os.path.join(os.path.dirname(__file__), "review_embeddings.parquet")) else "review_embeddings.parquet"
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+CACHE_FILE = os.path.join(_script_dir, "review_embeddings.parquet")
+MATRIX_FILE = os.path.join(_script_dir, "review_matrix.npy")
 
 FORBIDDEN_WORDS = ['drop', 'delete', 'truncate', 'alter', 'update', 'insert', 'create', 'replace', 'grant', 'revoke']
 
@@ -195,38 +196,44 @@ def get_embedding_model():
 
 def read_reviews_from_snowflake():
     conn = get_snowflake_connection(schema="RAW")
-    query = f"""
+    query = """
         SELECT REVIEW_ID, CITY, RATING, COMMENT
         FROM ZOMATO.STAGING.STG_REVIEWS
-        SAMPLE ({NEW_REVIEWS} ROWS)
     """
     df = conn.cursor().execute(query).fetch_pandas_all()
     conn.close()
     df.columns = [col.lower() for col in df.columns]
     return df
 
-def embed(texts):
+def embed_texts(texts):
     model = get_embedding_model()
-    embeddings = model.encode(texts, batch_size=64, show_progress_bar=False, normalize_embeddings=True)
-    return [e.tolist() for e in embeddings]
+    return model.encode(texts, batch_size=256, show_progress_bar=False, normalize_embeddings=True)
 
-@st.cache_data()
+def embed(texts):
+    return embed_texts(texts).tolist()
+
+@st.cache_resource
 def load_reviews():
-    if os.path.exists(CACHE_FILE):
-        return pd.read_parquet(CACHE_FILE)
+    if os.path.exists(CACHE_FILE) and os.path.exists(MATRIX_FILE):
+        df = pd.read_parquet(CACHE_FILE)
+        matrix = np.load(MATRIX_FILE)
+        return df, matrix
 
     df = read_reviews_from_snowflake()
-    df['embedding'] = embed(df['comment'].tolist())
-    df.to_parquet(CACHE_FILE)
-    return df
+    matrix = embed_texts(df['comment'].tolist())
+    np.save(MATRIX_FILE, matrix)
+    df_meta = df[['review_id', 'city', 'rating', 'comment']]
+    df_meta.to_parquet(CACHE_FILE, index=False)
+    return df_meta, matrix
 
-def find_similar_reviews(question, df, top_k=TOP_K):
-    question_vector = np.array(embed([question])[0])
-    matrix = np.vstack(df['embedding'].values)
+def find_similar_reviews(question, df, matrix, top_k=TOP_K):
+    question_vector = embed_texts([question])[0]
     scores = np.dot(matrix, question_vector)
-    df = df.copy()
-    df['score'] = scores
-    return df.nlargest(top_k, 'score')
+    top_indices = np.argpartition(scores, -top_k)[-top_k:]
+    top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
+    result = df.iloc[top_indices].copy()
+    result['score'] = scores[top_indices]
+    return result
 
 def ask_rag_llm(question, top_reviews, temperature=TEMPERATURE):
     context = ""
@@ -296,7 +303,7 @@ nav_tabs = st.tabs(["Review Intelligence (RAG)", "SQL Data Analyst (Text-to-SQL)
 # Tab 1: Review Intelligence (RAG)
 # -----------------------------------------------------------------------------
 with nav_tabs[0]:
-    review_df = load_reviews()
+    review_df, review_matrix = load_reviews()
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -344,7 +351,7 @@ with nav_tabs[0]:
 
     if question_rag:
         with st.spinner("Searching semantic vectors and synthesizing insights with Groq..."):
-            top_reviews = find_similar_reviews(question_rag, review_df, top_k=TOP_K)
+            top_reviews = find_similar_reviews(question_rag, review_df, review_matrix, top_k=TOP_K)
             answer = ask_rag_llm(question_rag, top_reviews, temperature=TEMPERATURE)
 
         st.markdown("### **AI Insights**")
