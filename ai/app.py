@@ -206,11 +206,20 @@ def get_snowflake_connection(schema="MARTS"):
 def get_embedding_model():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
+SAMPLE_N = 1000
+
+@st.cache_resource
+def get_total_review_count():
+    conn = get_snowflake_connection(schema="RAW")
+    result = conn.cursor().execute("SELECT COUNT(*) FROM ZOMATO.STAGING.STG_REVIEWS").fetchone()
+    return result[0]
+
 def read_reviews_from_snowflake():
     conn = get_snowflake_connection(schema="RAW")
-    query = """
+    query = f"""
         SELECT REVIEW_ID, CITY, RATING, COMMENT
         FROM ZOMATO.STAGING.STG_REVIEWS
+        SAMPLE ({SAMPLE_N} ROWS)
     """
     df = conn.cursor().execute(query).fetch_pandas_all()
     conn.close()
@@ -316,13 +325,14 @@ nav_tabs = st.tabs(["Review Intelligence (RAG)", "SQL Data Analyst (Text-to-SQL)
 # -----------------------------------------------------------------------------
 with nav_tabs[0]:
     review_df, review_matrix = load_reviews()
+    total_reviews = get_total_review_count()
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.markdown(f"""
         <div class="metric-card">
             <div class="metric-value">{len(review_df):,}</div>
-            <div class="metric-label">Analyzed Reviews</div>
+            <div class="metric-label">Reviews Loaded &nbsp;|&nbsp; {total_reviews:,} total</div>
         </div>
         """, unsafe_allow_html=True)
 
