@@ -1,8 +1,25 @@
 # Data files
 data/
 *.csv
+*.parquet
+*.tsv
 
-# Python
+# Environment & Secrets
+.env
+.env*
+*.env
+*.env.local
+Creds.txt
+[Cc]reds*
+[Ss]ecret*
+*credentials*.json
+*service-account*.json
+*.pem
+*.key
+profiles.yml
+**/profiles.yml
+
+# Python & Virtual Environments
 __pycache__/
 *.py[cod]
 *$py.class
@@ -13,19 +30,20 @@ venv/
 .venv/
 ENV/
 
-# Environment & Secrets
-.env
-.env.local
-Creds.txt
-Creds/
-[Cc]reds*
-profiles.yml
-
 # dbt artifacts & logs
 logs/
+**/logs/
 target/
+**/target/
 dbt_packages/
+**/dbt_packages/
+.user.yml
+**/.user.yml
 *.log
+
+# Airflow
+airflow/logs/
+airflow/pgdata/
 
 # IDE & OS
 .vscode/
