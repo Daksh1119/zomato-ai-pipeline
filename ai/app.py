@@ -1,12 +1,24 @@
 import os
 import json
+import logging
+import warnings
 import numpy as np
 import pandas as pd
 import streamlit as st
 import snowflake.connector
 from openai import OpenAI
 from dotenv import load_dotenv
+
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+warnings.filterwarnings("ignore", category=FutureWarning)
+
 from sentence_transformers import SentenceTransformer
+
 
 st.set_page_config(
     page_title="Zomato Reviews Dashboard",
