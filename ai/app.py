@@ -9,8 +9,7 @@ from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 
 st.set_page_config(
-    page_title="Zomato AI Intelligence Hub",
-    page_icon="🍅",
+    page_title="Zomato Reviews Dashboard",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
@@ -185,7 +184,7 @@ def get_snowflake_connection(schema="MARTS"):
         user=os.getenv("SNOWFLAKE_USER"),
         password=os.getenv("SNOWFLAKE_PASSWORD"),
         warehouse=os.getenv("SNOWFLAKE_WAREHOUSE", "ZOMATO_WH"),
-        database=os.getenv("SNOWFLAKE_DATABASE", "ZOMATO"),
+        database=os.getenv("SNOWFLAKE_DATABASE"),
         schema=schema,
         role=os.getenv("SNOWFLAKE_ROLE", "DBT_ROLE")
     )
@@ -286,8 +285,8 @@ def run_sql_query(sql):
 # -----------------------------------------------------------------------------
 st.markdown("""
 <div class="main-header">
-    <h1>Zomato AI Intelligence Hub</h1>
-    <p>Unified AI analytics platform: Conversational review intelligence (RAG) and Text-to-SQL Snowflake querying</p>
+    <h1>Zomato Reviews Dashboard</h1>
+    <p>Conversational review intelligence (RAG) and Text-to-SQL Snowflake analytics</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -406,7 +405,7 @@ with nav_tabs[1]:
     ex_cols = st.columns(2)
     for i, q_text in enumerate(EXAMPLE_QUESTIONS[:6]):
         with ex_cols[i % 2]:
-            if st.button(f"👉 {q_text}", key=f"sql_btn_{i}", use_container_width=True):
+            if st.button(q_text, key=f"sql_btn_{i}", use_container_width=True):
                 st.session_state["sql_question_val"] = q_text
 
     sql_default = st.session_state.get("sql_question_val", "")
