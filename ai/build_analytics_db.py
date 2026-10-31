@@ -23,7 +23,7 @@ def sql_path(path: Path) -> str:
     return path.resolve().as_posix().replace("'", "''")
 
 
-def build_database(data_dir: Path, output_path: Path, review_sample_size: int) -> None:
+def build_database(data_dir: Path, output_path: Path) -> None:
     required_files = ["orders.csv", "reviews.csv", "users.csv", "restaurant.csv"]
     missing = [name for name in required_files if not (data_dir / name).is_file()]
     if missing:
@@ -180,9 +180,10 @@ def build_database(data_dir: Path, output_path: Path, review_sample_size: int) -
             GROUP BY day_type
         """)
 
-        # A deterministic sample keeps the RAG index compact and reproducible.
+        # Keep the entire review corpus in the serving layer. The Streamlit app
+        # builds a bounded sparse index over this table at runtime.
         con.execute(f"""
-            CREATE TABLE review_sample AS
+            CREATE TABLE reviews AS
             WITH restaurant_city AS (
                 SELECT restaurant_id, city FROM dim_restaurants
             )
@@ -196,7 +197,6 @@ def build_database(data_dir: Path, output_path: Path, review_sample_size: int) -
                 ON TRY_CAST(r.restaurant_id AS BIGINT) = rc.restaurant_id
             WHERE r.comment IS NOT NULL AND TRIM(r.comment) <> ''
             ORDER BY TRY_CAST(r.review_id AS BIGINT)
-            LIMIT {int(review_sample_size)}
         """)
         con.execute("""
             CREATE TABLE mart_review_insights AS
@@ -218,7 +218,7 @@ def build_database(data_dir: Path, output_path: Path, review_sample_size: int) -
                     CASE
                         WHEN rating <= 2 THEN 1 ELSE 0
                     END AS flagged_issue
-                FROM review_sample
+                FROM reviews
             )
             SELECT
                 city,
@@ -235,7 +235,7 @@ def build_database(data_dir: Path, output_path: Path, review_sample_size: int) -
         # reference the large, local-only CSV source paths.
         con.execute("DROP VIEW source_orders")
         con.execute("DROP VIEW source_users")
-        con.execute("CREATE TABLE app_metadata AS SELECT COUNT(*) AS sampled_reviews FROM review_sample")
+        con.execute("CREATE TABLE app_metadata AS SELECT COUNT(*) AS total_reviews FROM reviews")
         con.execute("CHECKPOINT")
     finally:
         con.close()
@@ -245,10 +245,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build the deployable Zomato DuckDB analytics database.")
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--review-sample-size", type=int, default=1000)
     args = parser.parse_args()
 
-    build_database(args.data_dir, args.output, args.review_sample_size)
+    build_database(args.data_dir, args.output)
     size_mb = args.output.stat().st_size / 1024 / 1024
     print(f"Built {args.output} ({size_mb:.1f} MB)")
 

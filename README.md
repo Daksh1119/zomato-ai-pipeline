@@ -37,7 +37,7 @@ The pipeline processes seven source datasets representing the core entities of a
 | Transformation | dbt-snowflake 1.8 |
 | LLM Inference | Groq API (OpenAI-compatible, `openai/gpt-oss-20b`) |
 | Review Retrieval | TF-IDF bi-gram index (`scikit-learn`) |
-| Analytics Artifact | Compact DuckDB database (14 MB from local source data) |
+| Analytics Artifact | Compact DuckDB database (~15 MB from local source data) |
 | Analytics Application | Streamlit |
 | Containerisation | Docker Compose |
 | Source Control | GitHub |
@@ -273,12 +273,12 @@ A Retrieval-Augmented Generation system over customer review text.
 
 **Embedding and retrieval:**
 
-1. On demand, `load_reviews()` reads a deterministic review sample from the local DuckDB serving layer and builds a TF-IDF bi-gram index in memory.
-2. TF-IDF gives higher weight to terms distinctive to a review; L2 normalisation prepares the document-term matrix for cosine-similarity ranking.
-3. At query time, the question is transformed by the same vectorizer. A sparse matrix dot product ranks the review sample without a remote model download or a separate vector database.
+1. On demand, `load_reviews()` reads the full review corpus from the local DuckDB serving layer and builds a TF-IDF bi-gram index in memory.
+2. TF-IDF gives higher weight to terms distinctive to a review; L2 normalisation prepares the document-term matrix for cosine-similarity ranking. The vocabulary is bounded to 100,000 recurring terms and phrases to control memory without excluding any reviews from retrieval.
+3. At query time, the question is transformed by the same vectorizer. A sparse matrix dot product ranks the full review corpus without a remote model download or a separate vector database.
 4. The top-K most similar reviews are retrieved and passed as structured context to the Groq LLM, which synthesises a grounded natural-language answer.
 
-**Performance characteristics**: The sparse TF-IDF matrix makes retrieval over the 1,000-review serving sample fast on CPU, without a vector database or Hugging Face model download.
+**Performance characteristics**: The bounded sparse TF-IDF matrix makes full-corpus retrieval practical on CPU, without a vector database or Hugging Face model download.
 
 ### Tab 2: SQL Data Analyst (Text-to-SQL)
 

@@ -219,16 +219,13 @@ def get_database_connection():
         )
     return duckdb.connect(DATABASE_FILE, read_only=True)
 
-SAMPLE_N = 1000
-
 def read_reviews_from_duckdb():
     conn = get_database_connection()
     df = conn.execute("""
         SELECT review_id, city, rating, comment
-        FROM review_sample
+        FROM reviews
         ORDER BY review_id
-        LIMIT ?
-    """, [SAMPLE_N]).fetchdf()
+    """).fetchdf()
     conn.close()
     df.columns = [col.lower() for col in df.columns]
     return df, len(df)
@@ -236,7 +233,15 @@ def read_reviews_from_duckdb():
 @st.cache_resource
 def load_reviews():
     df, total = read_reviews_from_duckdb()
-    vectorizer = TfidfVectorizer(ngram_range=(1, 2), stop_words="english", norm="l2")
+    vectorizer = TfidfVectorizer(
+        ngram_range=(1, 2),
+        stop_words="english",
+        min_df=2,
+        max_features=100_000,
+        sublinear_tf=True,
+        norm="l2",
+        dtype=np.float32,
+    )
     matrix = vectorizer.fit_transform(df["comment"].fillna(""))
     return df, vectorizer, matrix, total
 
@@ -347,7 +352,7 @@ with nav_tabs[0]:
             st.markdown(f"""
             <div class="metric-card">
                 <div class="metric-value">{len(review_df):,}</div>
-                <div class="metric-label">Reviews Indexed &nbsp;|&nbsp; {total_reviews:,} sample</div>
+                <div class="metric-label">Reviews Indexed &nbsp;|&nbsp; Full Corpus</div>
             </div>
             """, unsafe_allow_html=True)
 
