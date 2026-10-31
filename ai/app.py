@@ -317,30 +317,26 @@ nav_tabs = st.tabs(["Review Intelligence (RAG)", "SQL Data Analyst (Text-to-SQL)
 # Tab 1: Review Intelligence (RAG)
 # -----------------------------------------------------------------------------
 with nav_tabs[0]:
-    # Loading reviews and building the retrieval index is deferred so Community
-    # Cloud can render the dashboard shell immediately on a cold start.
     if "reviews_ready" not in st.session_state:
         st.session_state.reviews_ready = False
 
     if not st.session_state.reviews_ready:
-        st.info("Load the review sample to enable relevant-review search.")
-        if st.button("Load review intelligence", type="primary"):
-            try:
-                with st.spinner("Loading reviews and preparing review search…"):
-                    review_df, review_vectorizer, review_matrix, total_reviews = load_reviews()
-                st.session_state.review_df = review_df
-                st.session_state.review_vectorizer = review_vectorizer
-                st.session_state.review_matrix = review_matrix
-                st.session_state.total_reviews = total_reviews
-                st.session_state.reviews_ready = True
-                st.rerun()
-            except Exception as exc:
-                st.error(
-                    "Review data could not be loaded. Ensure the local DuckDB database "
-                    "is deployed with the app, then try again."
-                )
-                st.exception(exc)
-    else:
+        try:
+            with st.spinner("Preparing review intelligence…"):
+                review_df, review_vectorizer, review_matrix, total_reviews = load_reviews()
+            st.session_state.review_df = review_df
+            st.session_state.review_vectorizer = review_vectorizer
+            st.session_state.review_matrix = review_matrix
+            st.session_state.total_reviews = total_reviews
+            st.session_state.reviews_ready = True
+        except Exception as exc:
+            st.error(
+                "Review data could not be loaded. Ensure the local DuckDB database "
+                "is deployed with the app, then refresh the page."
+            )
+            st.exception(exc)
+
+    if st.session_state.reviews_ready:
         review_df = st.session_state.review_df
         review_vectorizer = st.session_state.review_vectorizer
         review_matrix = st.session_state.review_matrix
