@@ -1,24 +1,12 @@
 import os
 import json
-import logging
-import warnings
 import numpy as np
 import pandas as pd
 import streamlit as st
-import snowflake.connector
+import duckdb
 from openai import OpenAI
 from dotenv import load_dotenv
-
-os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
-os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
-logging.getLogger("transformers").setLevel(logging.ERROR)
-logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
-warnings.filterwarnings("ignore", category=FutureWarning)
-
-from sentence_transformers import SentenceTransformer
-
+from sklearn.feature_extraction.text import TfidfVectorizer
 
 st.set_page_config(
     page_title="Zomato Reviews Dashboard",
@@ -129,8 +117,7 @@ CHAT_MODEL = "openai/gpt-oss-20b"
 TOP_K = 5
 TEMPERATURE = 0.2
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-CACHE_FILE = os.path.join(_script_dir, "review_embeddings.parquet")
-MATRIX_FILE = os.path.join(_script_dir, "review_matrix.npy")
+DATABASE_FILE = os.path.join(_script_dir, "zomato_analytics.duckdb")
 
 FORBIDDEN_WORDS = ['drop', 'delete', 'truncate', 'alter', 'update', 'insert', 'create', 'replace', 'grant', 'revoke']
 
@@ -147,42 +134,48 @@ EXAMPLE_QUESTIONS = [
     "Most common key issues mentioned in negative reviews"
 ]
 
-client = OpenAI(
-    base_url="https://api.groq.com/openai/v1",
-    api_key=os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY"),
-)
+@st.cache_resource
+def get_llm_client():
+    """Create the API client only when an AI question is submitted.
+
+    This keeps a missing optional Groq key from preventing the dashboard shell
+    from rendering on a fresh Streamlit deployment.
+    """
+    api_key = os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("Set GROQ_API_KEY (or OPENAI_API_KEY) in Streamlit secrets.")
+    return OpenAI(base_url="https://api.groq.com/openai/v1", api_key=api_key)
 
 SCHEMA = """
-Snowflake Database: ZOMATO (Default Schema: MARTS)
-Use bare table names for MARTS tables (e.g., FACT_ORDERS, DIM_RESTAURANTS). Use ZOMATO.AI.REVIEW_ENRICHED for review data.
+DuckDB database containing Zomato's compact analytics-serving layer.
+Use only the listed tables and exact column names. Raw event tables are intentionally not deployed.
 
 TABLE DEFINITIONS:
-1. FACT_ORDERS(order_id, order_timestamp, order_date, customer_id, restaurant_id, city, cuisine, payment_method, order_status, is_delivered, items_count, sales_qty, subtotal, discount, delivery_fee, gst, sales_amount, customer_rating, delivery_time_min)
-2. FACT_ORDER_ITEMS(order_item_id, order_id, restaurant_id, f_id, order_ts, order_date, city, price, quantity, line_amount)
-3. DIM_RESTAURANTS(restaurant_id, restaurant_name, city, cuisine, rating, rating_count, cost_for_two)
-4. DIM_CUSTOMER(customer_id, customer_name, email, age, age_segment, gender, marital_status, occupation, income_band, education, family_size)
-5. DIM_DATE(date_day, year, month, month_name, day_name, is_weekend)
-6. MART_DAILY_CITY_REVENUE(order_date, city, orders, delivered_orders, cancel_rate, gmv, aov)
-7. MART_RESTAURANT_PERFORMANCE(restaurant_id, restaurant_name, city, cuisine, orders, revenue, avg_customer_rating, avg_delivery_min)
-8. MART_DELIVERY_SLA(city, order_hour, delivered_orders, p50, p90)
-9. MART_REVIEW_INSIGHTS(city, topic, sentiment_label, reviews, avg_sentiment_score, avg_star_rating, flagged_issues)
-10. ZOMATO.AI.REVIEW_ENRICHED(review_id, sentiment_label, sentiment_score, topic, key_issue, model, enriched_at)
+1. MART_DAILY_CITY_REVENUE(order_date, city, orders, delivered_orders, cancel_rate, gmv, aov)
+2. MART_RESTAURANT_PERFORMANCE(restaurant_id, restaurant_name, city, cuisine, orders, revenue, avg_customer_rating, avg_delivery_min)
+3. MART_DELIVERY_SLA(city, order_hour, delivered_orders, p50, p90)
+4. MART_PAYMENT_CANCELLATION(payment_method, orders, cancelled_orders, cancel_rate)
+5. MART_CUSTOMER_SEGMENT(age_segment, cuisine, orders, delivered_orders, gmv, aov)
+6. MART_INCOME_CUISINE(income_band, cuisine, orders, gmv)
+7. MART_WEEKDAY_PERFORMANCE(day_type, orders, delivered_orders, gmv, aov)
+8. MART_REVIEW_INSIGHTS(city, topic, sentiment_label, reviews, avg_sentiment_score, flagged_issues)
+9. DIM_RESTAURANTS(restaurant_id, restaurant_name, city, cuisine, rating, rating_count, cost_for_two)
 
 BUSINESS LOGIC & METRIC DEFINITIONS:
-- GMV: Total delivered revenue (MART_DAILY_CITY_REVENUE.gmv or SUM(sales_amount) WHERE is_delivered = TRUE in FACT_ORDERS).
+- GMV: total delivered revenue; all gmv columns are already aggregated.
 - AOV: GMV / delivered_orders.
-- Cancel Rate: Proportion of cancelled orders.
-- Delivery Time: delivery_time_min or p50/p90 in MART_DELIVERY_SLA.
-- Weekend Analysis: Join with DIM_DATE on order_date = date_day and filter/group by is_weekend.
-- Prefer MART_ tables when answering aggregated questions.
+- Cancel Rate: use MART_PAYMENT_CANCELLATION for payment-method analysis.
+- Delivery Time: p50/p90 in MART_DELIVERY_SLA or avg_delivery_min in MART_RESTAURANT_PERFORMANCE.
+- Weekend Analysis: MART_WEEKDAY_PERFORMANCE already provides Weekend and Weekday rows.
+- To find cuisine revenue, SUM(revenue) from MART_RESTAURANT_PERFORMANCE grouped by cuisine.
 """
 
 SYSTEM_PROMPT = f"""
-You are a Snowflake SQL expert for Zomato. Write ONE clean, efficient SELECT query that accurately answers the user's question.
+You are a DuckDB SQL expert for Zomato. Write ONE clean, efficient SELECT query that accurately answers the user's question.
 
 Rules:
 - SELECT queries only, never modify data.
-- Use bare table names for MARTS tables (FACT_ORDERS, DIM_CUSTOMER, etc.), use ZOMATO.AI.REVIEW_ENRICHED for reviews.
+- Use only the tables in the supplied schema, with bare uppercase table names.
 - Add an appropriate ORDER BY and LIMIT (default 100 or less, unless a single scalar total is asked).
 - Use uppercase SQL keywords (SELECT, FROM, WHERE, GROUP BY, ORDER BY).
 - Reply strictly as JSON in this exact format: {{"sql": "your query here"}}
@@ -190,62 +183,39 @@ Rules:
 {SCHEMA}
 """
 
-def get_snowflake_connection(schema="MARTS"):
-    return snowflake.connector.connect(
-        account=os.getenv("SNOWFLAKE_ACCOUNT"),
-        user=os.getenv("SNOWFLAKE_USER"),
-        password=os.getenv("SNOWFLAKE_PASSWORD"),
-        warehouse=os.getenv("SNOWFLAKE_WAREHOUSE", "ZOMATO_WH"),
-        database=os.getenv("SNOWFLAKE_DATABASE"),
-        schema=schema,
-        role=os.getenv("SNOWFLAKE_ROLE", "DBT_ROLE")
-    )
-
-@st.cache_resource
-def get_embedding_model():
-    return SentenceTransformer("all-MiniLM-L6-v2")
+def get_database_connection():
+    if not os.path.exists(DATABASE_FILE):
+        raise FileNotFoundError(
+            "The local analytics database is missing. Run "
+            "`python ai/build_analytics_db.py` before starting the app."
+        )
+    return duckdb.connect(DATABASE_FILE, read_only=True)
 
 SAMPLE_N = 1000
 
-def read_reviews_from_snowflake():
-    conn = get_snowflake_connection(schema="RAW")
-    cur = conn.cursor()
-    total = cur.execute("SELECT COUNT(*) FROM ZOMATO.STAGING.STG_REVIEWS").fetchone()[0]
-    df = cur.execute(f"""
-        SELECT REVIEW_ID, CITY, RATING, COMMENT
-        FROM ZOMATO.STAGING.STG_REVIEWS
-        SAMPLE ({SAMPLE_N} ROWS)
-    """).fetch_pandas_all()
+def read_reviews_from_duckdb():
+    conn = get_database_connection()
+    df = conn.execute("""
+        SELECT review_id, city, rating, comment
+        FROM review_sample
+        ORDER BY review_id
+        LIMIT ?
+    """, [SAMPLE_N]).fetchdf()
     conn.close()
     df.columns = [col.lower() for col in df.columns]
-    return df, total
-
-def embed_texts(texts):
-    model = get_embedding_model()
-    return model.encode(texts, batch_size=256, show_progress_bar=False, normalize_embeddings=True)
-
-def embed(texts):
-    return embed_texts(texts).tolist()
+    return df, len(df)
 
 @st.cache_resource
 def load_reviews():
-    if os.path.exists(CACHE_FILE) and os.path.exists(MATRIX_FILE):
-        df = pd.read_parquet(CACHE_FILE)
-        matrix = np.load(MATRIX_FILE)
-        total = int(df.attrs.get("total_count", len(df)))
-        return df, matrix, total
+    df, total = read_reviews_from_duckdb()
+    vectorizer = TfidfVectorizer(ngram_range=(1, 2), stop_words="english", norm="l2")
+    matrix = vectorizer.fit_transform(df["comment"].fillna(""))
+    return df, vectorizer, matrix, total
 
-    df, total = read_reviews_from_snowflake()
-    matrix = embed_texts(df['comment'].tolist())
-    np.save(MATRIX_FILE, matrix)
-    df_meta = df[['review_id', 'city', 'rating', 'comment']]
-    df_meta.attrs["total_count"] = total
-    df_meta.to_parquet(CACHE_FILE, index=False)
-    return df_meta, matrix, total
-
-def find_similar_reviews(question, df, matrix, top_k=TOP_K):
-    question_vector = embed_texts([question])[0]
-    scores = np.dot(matrix, question_vector)
+def find_similar_reviews(question, df, vectorizer, matrix, top_k=TOP_K):
+    question_vector = vectorizer.transform([question])
+    scores = (matrix @ question_vector.T).toarray().ravel()
+    top_k = min(top_k, len(df))
     top_indices = np.argpartition(scores, -top_k)[-top_k:]
     top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
     result = df.iloc[top_indices].copy()
@@ -265,7 +235,7 @@ def ask_rag_llm(question, top_reviews, temperature=TEMPERATURE):
     )
     user_prompt = f"Question: {question}\n\nCustomer Reviews Context:\n{context}"
 
-    response = client.chat.completions.create(
+    response = get_llm_client().chat.completions.create(
         model=CHAT_MODEL,
         temperature=temperature,
         messages=[
@@ -276,7 +246,7 @@ def ask_rag_llm(question, top_reviews, temperature=TEMPERATURE):
     return response.choices[0].message.content
 
 def generate_sql(question):
-    response = client.chat.completions.create(
+    response = get_llm_client().chat.completions.create(
         model=CHAT_MODEL,
         temperature=0,
         response_format={"type": "json_object"},
@@ -297,11 +267,15 @@ def is_safe_sql(sql):
     for word in FORBIDDEN_WORDS:
         if word in lowered:
             return False
-    return True
+    try:
+        statements = duckdb.extract_statements(sql)
+    except duckdb.ParserException:
+        return False
+    return len(statements) == 1 and str(statements[0].type) == "StatementType.SELECT"
 
 def run_sql_query(sql):
-    conn = get_snowflake_connection(schema="MARTS")
-    df = conn.cursor().execute(sql).fetch_pandas_all()
+    conn = get_database_connection()
+    df = conn.execute(sql).fetchdf()
     conn.close()
     return df
 
@@ -311,7 +285,7 @@ def run_sql_query(sql):
 st.markdown("""
 <div class="main-header">
     <h1>Zomato Reviews Dashboard</h1>
-    <p>Conversational review intelligence (RAG) and Text-to-SQL Snowflake analytics</p>
+    <p>Conversational review intelligence (RAG) and Text-to-SQL DuckDB analytics</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -321,55 +295,84 @@ nav_tabs = st.tabs(["Review Intelligence (RAG)", "SQL Data Analyst (Text-to-SQL)
 # Tab 1: Review Intelligence (RAG)
 # -----------------------------------------------------------------------------
 with nav_tabs[0]:
-    review_df, review_matrix, total_reviews = load_reviews()
+    # Loading reviews and building the retrieval index is deferred so Community
+    # Cloud can render the dashboard shell immediately on a cold start.
+    if "reviews_ready" not in st.session_state:
+        st.session_state.reviews_ready = False
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{len(review_df):,}</div>
-            <div class="metric-label">Reviews Loaded &nbsp;|&nbsp; {total_reviews:,} total</div>
-        </div>
-        """, unsafe_allow_html=True)
+    if not st.session_state.reviews_ready:
+        st.info("Load the review sample to enable relevant-review search.")
+        if st.button("Load review intelligence", type="primary"):
+            try:
+                with st.spinner("Loading reviews and preparing review search…"):
+                    review_df, review_vectorizer, review_matrix, total_reviews = load_reviews()
+                st.session_state.review_df = review_df
+                st.session_state.review_vectorizer = review_vectorizer
+                st.session_state.review_matrix = review_matrix
+                st.session_state.total_reviews = total_reviews
+                st.session_state.reviews_ready = True
+                st.rerun()
+            except Exception as exc:
+                st.error(
+                    "Review data could not be loaded. Ensure the local DuckDB database "
+                    "is deployed with the app, then try again."
+                )
+                st.exception(exc)
+    else:
+        review_df = st.session_state.review_df
+        review_vectorizer = st.session_state.review_vectorizer
+        review_matrix = st.session_state.review_matrix
+        total_reviews = st.session_state.total_reviews
 
-    with col2:
-        avg_rating = review_df['rating'].mean() if 'rating' in review_df.columns else 0.0
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">★ {avg_rating:.2f}</div>
-            <div class="metric-label">Avg Rating</div>
-        </div>
-        """, unsafe_allow_html=True)
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-value">{len(review_df):,}</div>
+                <div class="metric-label">Reviews Indexed &nbsp;|&nbsp; {total_reviews:,} sample</div>
+            </div>
+            """, unsafe_allow_html=True)
 
-    with col3:
-        num_cities = review_df['city'].nunique() if 'city' in review_df.columns else 0
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{num_cities}</div>
-            <div class="metric-label">Cities Covered</div>
-        </div>
-        """, unsafe_allow_html=True)
+        with col2:
+            avg_rating = review_df['rating'].mean() if 'rating' in review_df.columns else 0.0
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-value">★ {avg_rating:.2f}</div>
+                <div class="metric-label">Avg Rating</div>
+            </div>
+            """, unsafe_allow_html=True)
 
-    with col4:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">Groq</div>
-            <div class="metric-label">Ultra-Fast Inference</div>
-        </div>
-        """, unsafe_allow_html=True)
+        with col3:
+            num_cities = review_df['city'].nunique() if 'city' in review_df.columns else 0
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-value">{num_cities}</div>
+                <div class="metric-label">Cities Covered</div>
+            </div>
+            """, unsafe_allow_html=True)
 
-    st.write("")
-    st.write("")
+        with col4:
+            st.markdown("""
+            <div class="metric-card">
+                <div class="metric-value">Groq</div>
+                <div class="metric-label">Ultra-Fast Inference</div>
+            </div>
+            """, unsafe_allow_html=True)
 
-    question_rag = st.text_input(
-        "**Ask a question about customer reviews:**",
-        placeholder="e.g. Top 5 cities for giving worst reviews, or what are the most common complaints about delivery?",
-        key="rag_input"
-    )
+        st.write("")
+        st.write("")
 
-    if question_rag:
-        with st.spinner("Searching semantic vectors and synthesizing insights with Groq..."):
-            top_reviews = find_similar_reviews(question_rag, review_df, review_matrix, top_k=TOP_K)
+        question_rag = st.text_input(
+            "**Ask a question about customer reviews:**",
+            placeholder="e.g. Top 5 cities for giving worst reviews, or what are the most common complaints about delivery?",
+            key="rag_input"
+        )
+
+    if st.session_state.reviews_ready and question_rag:
+        with st.spinner("Retrieving relevant reviews and synthesizing insights with Groq..."):
+            top_reviews = find_similar_reviews(
+                question_rag, review_df, review_vectorizer, review_matrix, top_k=TOP_K
+            )
             answer = ask_rag_llm(question_rag, top_reviews, temperature=TEMPERATURE)
 
         st.markdown("### **AI Insights**")
@@ -423,8 +426,8 @@ with nav_tabs[0]:
 # Tab 2: SQL Data Analyst (Text-to-SQL)
 # -----------------------------------------------------------------------------
 with nav_tabs[1]:
-    st.markdown("### **Conversational Snowflake SQL Analytics**")
-    st.caption("Ask questions in natural language. Groq LLM generates Snowflake SQL, runs queries, and displays data & charts.")
+    st.markdown("### **Conversational DuckDB SQL Analytics**")
+    st.caption("Ask questions in natural language. Groq generates DuckDB SQL, runs it locally, and displays data and charts.")
 
     st.markdown("#### **Example Queries**")
     ex_cols = st.columns(2)
@@ -442,7 +445,7 @@ with nav_tabs[1]:
     )
 
     if question_sql:
-        with st.spinner("Generating Snowflake SQL with Groq..."):
+        with st.spinner("Generating DuckDB SQL with Groq..."):
             sql = generate_sql(question_sql)
         
         st.markdown("##### **Generated SQL Query**")
@@ -452,7 +455,7 @@ with nav_tabs[1]:
             st.error("The generated SQL is not safe to run (data modifications are prohibited).")
         else:
             try:
-                with st.spinner("Running query on Snowflake..."):
+                with st.spinner("Running query on DuckDB..."):
                     df_sql = run_sql_query(sql)
                 st.success(f"Returned {len(df_sql)} rows")
                 st.dataframe(df_sql, hide_index=True, use_container_width=True)
@@ -461,4 +464,4 @@ with nav_tabs[1]:
                     st.bar_chart(df_sql, x=df_sql.columns[0], y=df_sql.columns[1])
 
             except Exception as e:
-                st.error(f"Error running Snowflake query: {e}")
+                st.error(f"Error running DuckDB query: {e}")

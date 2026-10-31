@@ -31,12 +31,13 @@ The pipeline processes seven source datasets representing the core entities of a
 
 | Layer | Technology |
 |---|---|
-| Cloud Data Warehouse | Snowflake |
+| Pipeline Warehouse | Snowflake |
+| Dashboard Analytics Store | DuckDB (deployable serving layer) |
 | Orchestration | Apache Airflow 3 (Docker, LocalExecutor) |
 | Transformation | dbt-snowflake 1.8 |
 | LLM Inference | Groq API (OpenAI-compatible, `openai/gpt-oss-20b`) |
-| Embeddings | `sentence-transformers` (`all-MiniLM-L6-v2`) |
-| Vector Cache | Apache Parquet (local disk via `pyarrow`) |
+| Review Retrieval | TF-IDF bi-gram index (`scikit-learn`) |
+| Analytics Artifact | Compact DuckDB database (14 MB from local source data) |
 | Analytics Application | Streamlit |
 | Containerisation | Docker Compose |
 | Source Control | GitHub |
@@ -85,7 +86,9 @@ zomato-de-pipeline/
 │   ├── enrich_reviews.py           # Batch LLM enrichment: classifies review sentiment and topics
 │   ├── rag_chat.py                 # Standalone RAG Streamlit application (per-app entrypoint)
 │   ├── text_to_sql.py              # Standalone Text-to-SQL Streamlit application
-│   ├── app.py                      # Unified multi-tab Streamlit hub (primary entrypoint)
+│   ├── app.py                      # Unified multi-tab Streamlit hub
+│   ├── build_analytics_db.py       # Builds the deployable DuckDB serving layer from CSVs
+│   └── zomato_analytics.duckdb     # Compact analytics artifact used by Streamlit
 │   └── requirements.txt            # Python dependencies for AI layer
 │
 ├── data/                           # Source CSVs (git-ignored; loaded to Snowflake stage)
@@ -270,19 +273,19 @@ A Retrieval-Augmented Generation system over customer review text.
 
 **Embedding and retrieval:**
 
-1. On first load, `load_reviews()` either reads a local `review_embeddings.parquet` cache or fetches reviews from `ZOMATO.STAGING.STG_REVIEWS` via Snowflake.
-2. The `sentence-transformers` model (`all-MiniLM-L6-v2`) encodes review text to 384-dimensional normalised float vectors, stored in the parquet cache for sub-second subsequent loads.
-3. At query time, the user's question is embedded using the same model. Semantic similarity is computed via **matrix dot product** (`numpy.dot` against the full embedding matrix), leveraging BLAS-accelerated linear algebra. Because vectors are L2-normalised, the dot product equals cosine similarity.
+1. On demand, `load_reviews()` reads a deterministic review sample from the local DuckDB serving layer and builds a TF-IDF bi-gram index in memory.
+2. TF-IDF gives higher weight to terms distinctive to a review; L2 normalisation prepares the document-term matrix for cosine-similarity ranking.
+3. At query time, the question is transformed by the same vectorizer. A sparse matrix dot product ranks the review sample without a remote model download or a separate vector database.
 4. The top-K most similar reviews are retrieved and passed as structured context to the Groq LLM, which synthesises a grounded natural-language answer.
 
-**Performance characteristics**: The parquet cache and vectorised dot product make similarity search over hundreds of reviews operate in under 50 ms on CPU, without requiring a vector database.
+**Performance characteristics**: The sparse TF-IDF matrix makes retrieval over the 1,000-review serving sample fast on CPU, without a vector database or Hugging Face model download.
 
 ### Tab 2: SQL Data Analyst (Text-to-SQL)
 
-A natural-language-to-SQL interface against the full Snowflake MARTS schema.
+A natural-language-to-SQL interface against a compact DuckDB serving layer.
 
-- A schema-aware system prompt encodes all 10 table definitions, column names, join keys, and business metric definitions (GMV, AOV, cancel rate, SLA percentiles).
-- The Groq LLM returns a JSON object `{"sql": "..."}` which is parsed and cleaned (schema prefix stripping, semicolon removal).
+- A schema-aware system prompt encodes the dashboard's aggregate marts and business metric definitions (GMV, AOV, cancel rate, SLA percentiles).
+- The Groq LLM returns a JSON object `{"sql": "..."}` which is parsed and executed by DuckDB.
 - A **SQL safety guard** (`is_safe_sql`) rejects any statement that does not begin with `SELECT` or `WITH`, or contains DML/DDL keywords, before execution.
 - Results are rendered as an interactive `st.dataframe`. Two-column numeric results automatically generate a bar chart.
 
@@ -384,13 +387,6 @@ cp ai/.env.example ai/.env
 **`ai/.env.example`:**
 
 ```dotenv
-SNOWFLAKE_ACCOUNT=your_account_identifier
-SNOWFLAKE_USER=your_username
-SNOWFLAKE_PASSWORD=your_password
-SNOWFLAKE_WAREHOUSE=ZOMATO_WH
-SNOWFLAKE_DATABASE=ZOMATO
-SNOWFLAKE_SCHEMA=MARTS
-SNOWFLAKE_ROLE=DBT_ROLE
 GROQ_API_KEY=gsk_your_groq_api_key
 ```
 
@@ -424,12 +420,12 @@ dbt build           # run all models and tests
 ### 6. Run the Streamlit Application Locally
 
 ```bash
-cd ai
 pip install -r requirements.txt
+python ai/build_analytics_db.py
 streamlit run app.py
 ```
 
-The application will be available at [http://localhost:8501](http://localhost:8501).
+The builder reads the git-ignored source CSVs and creates a compact `ai/zomato_analytics.duckdb` artifact. The application will be available at [http://localhost:8501](http://localhost:8501).
 
 ---
 
@@ -441,21 +437,16 @@ The application is deployable directly from GitHub at [share.streamlit.io](https
 |---|---|
 | Repository | `Daksh1119/zomato-de-pipeline` |
 | Branch | `main` |
-| Main file path | `ai/app.py` |
+| Main file path | `app.py` |
 | Python version | `3.11` |
 
-In **Advanced Settings → Secrets**, add all keys from `ai/.env.example` in TOML format:
+Commit `ai/zomato_analytics.duckdb` with the application. In **Advanced Settings → Secrets**, only add the Groq key in TOML format:
 
 ```toml
-SNOWFLAKE_ACCOUNT = "your_account_identifier"
-SNOWFLAKE_USER = "your_username"
-SNOWFLAKE_PASSWORD = "your_password"
-SNOWFLAKE_WAREHOUSE = "ZOMATO_WH"
-SNOWFLAKE_DATABASE = "ZOMATO"
-SNOWFLAKE_SCHEMA = "MARTS"
-SNOWFLAKE_ROLE = "DBT_ROLE"
 GROQ_API_KEY = "gsk_your_groq_api_key"
 ```
+
+Snowflake remains an optional upstream warehouse for the Airflow and dbt pipeline. The public dashboard does not require Snowflake credentials or a running warehouse.
 
 ---
 
@@ -467,7 +458,7 @@ GROQ_API_KEY = "gsk_your_groq_api_key"
 
 **Tag-based DAG splitting**: Tagging `mart_review_insights` with `tag:ai` and splitting `dbt_build_core` and `dbt_build_ai` into separate Airflow tasks ensures that the AI mart is never built before the enrichment step has written its data. It also allows the core dimensional model to be rebuilt independently.
 
-**Parquet embedding cache**: Storing sentence-transformer embeddings in Parquet eliminates the model inference cost on every Streamlit reboot. The application starts in under one second on cache hit, versus 30+ seconds for a full re-embed from Snowflake.
+**DuckDB serving layer**: The builder transforms multi-gigabyte source files into a small read-only analytics artifact. This separates the heavy batch workload from interactive dashboard serving and removes the warehouse dependency from the deployed app.
 
 **Groq as LLM provider**: Groq's inference engine delivers low-latency responses suitable for interactive applications. The OpenAI-compatible API surface means the client code requires no provider-specific SDK.
 
