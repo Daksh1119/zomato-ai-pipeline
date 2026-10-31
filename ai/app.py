@@ -425,6 +425,11 @@ with nav_tabs[0]:
 # -----------------------------------------------------------------------------
 # Tab 2: SQL Data Analyst (Text-to-SQL)
 # -----------------------------------------------------------------------------
+def select_example_query(question):
+    """Populate the SQL input before Streamlit reruns after an example tap."""
+    st.session_state["sql_text_input"] = question
+
+
 with nav_tabs[1]:
     st.markdown("### **Conversational DuckDB SQL Analytics**")
     st.caption("Ask questions in natural language. Groq generates DuckDB SQL, runs it locally, and displays data and charts.")
@@ -433,13 +438,16 @@ with nav_tabs[1]:
     ex_cols = st.columns(2)
     for i, q_text in enumerate(EXAMPLE_QUESTIONS[:6]):
         with ex_cols[i % 2]:
-            if st.button(q_text, key=f"sql_btn_{i}", use_container_width=True):
-                st.session_state["sql_question_val"] = q_text
+            st.button(
+                q_text,
+                key=f"sql_btn_{i}",
+                use_container_width=True,
+                on_click=select_example_query,
+                args=(q_text,)
+            )
 
-    sql_default = st.session_state.get("sql_question_val", "")
     question_sql = st.text_input(
         "**Enter your business question:**",
-        value=sql_default,
         placeholder="e.g. Top 10 cities by GMV, or Cancel rate by payment method",
         key="sql_text_input"
     )
