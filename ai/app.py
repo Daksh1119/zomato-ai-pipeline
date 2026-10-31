@@ -461,6 +461,8 @@ with nav_tabs[1]:
                 st.dataframe(df_sql, hide_index=True, use_container_width=True)
 
                 if len(df_sql.columns) == 2 and pd.api.types.is_numeric_dtype(df_sql.iloc[:, 1]):
+                    st.markdown("<div style='height: 2rem;'></div>", unsafe_allow_html=True)
+                    st.markdown("#### Visual summary")
                     st.bar_chart(df_sql, x=df_sql.columns[0], y=df_sql.columns[1])
 
             except Exception as e:
