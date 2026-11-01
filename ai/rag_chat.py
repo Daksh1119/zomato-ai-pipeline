@@ -7,6 +7,19 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 
+try:
+    from ai.insight_format import (
+        REVIEW_ANALYST_PROMPT,
+        normalise_review_insight,
+        render_review_insight,
+    )
+except ModuleNotFoundError:
+    from insight_format import (
+        REVIEW_ANALYST_PROMPT,
+        normalise_review_insight,
+        render_review_insight,
+    )
+
 st.set_page_config(
     page_title="Zomato Review Intelligence",
     layout="wide",
@@ -82,6 +95,17 @@ st.markdown("""
         margin: 16px 0 24px 0;
         font-size: 1.05rem;
         line-height: 1.65;
+    }
+    .answer-summary { margin: 0; font-size: 1.06rem; font-weight: 500; }
+    .insight-findings { display: grid; gap: 10px; margin-top: 16px; }
+    .insight-finding { border-top: 1px solid rgba(128, 128, 128, 0.18); padding-top: 12px; }
+    .insight-finding p, .insight-note, .insight-next { margin: 5px 0; }
+    .finding-title { font-weight: 650; }
+    .finding-label, .insight-note span, .insight-next span {
+        display: inline-block; min-width: 112px; color: #7b2630; font-weight: 600;
+    }
+    .insight-note, .insight-next {
+        border-top: 1px solid rgba(128, 128, 128, 0.18); padding-top: 12px; margin-top: 14px;
     }
     
     .review-card {
@@ -179,28 +203,29 @@ def find_similar_reviews(question, df, top_k=TOP_K):
     return df.nlargest(top_k, 'score')
 
 def ask_llm(question, top_reviews, temperature=TEMPERATURE):
-    context = ""
-    for _, row in top_reviews.iterrows():
-        context += f"• [{row['city']} | {row['rating']}★]: {row['comment']}\n"
+    context_parts = []
+    for position, (_, row) in enumerate(top_reviews.iterrows(), start=1):
+        context_parts.append(
+            f"Review {position}\nCity: {row['city']}\nRating: {row['rating']} out of 5\n"
+            f"Comment: {row['comment']}"
+        )
 
-    system_prompt = (
-        "You are an AI data analyst for Zomato. "
-        "Answer the user's question accurately and ONLY based on the provided customer reviews. "
-        "Be concise, clear, and structured. Use bullet points where appropriate. "
-        "If the reviews don't contain enough information to answer, explicitly state that."
+    user_prompt = (
+        f"Question: {question}\n\nRetrieved customer reviews begin\n"
+        + "\n\n".join(context_parts)
+        + "\nRetrieved customer reviews end"
     )
-
-    user_prompt = f"Question: {question}\n\nCustomer Reviews Context:\n{context}"
 
     response = client.chat.completions.create(
         model=CHAT_MODEL,
         temperature=temperature,
+        response_format={"type": "json_object"},
         messages=[
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": REVIEW_ANALYST_PROMPT},
             {"role": "user", "content": user_prompt}
         ]
     )
-    return response.choices[0].message.content
+    return normalise_review_insight(response.choices[0].message.content)
 
 st.markdown("""
 <div class="main-header">
@@ -257,14 +282,10 @@ question = st.text_input(
 if question:
     with st.spinner("Searching semantic vectors and synthesizing insights with Groq..."):
         top_reviews = find_similar_reviews(question, review_df, top_k=TOP_K)
-        answer = ask_llm(question, top_reviews, temperature=TEMPERATURE)
+        insight = ask_llm(question, top_reviews, temperature=TEMPERATURE)
 
-    st.markdown("### **AI Insights**")
-    st.markdown(f"""
-    <div class="answer-card">
-        {answer}
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown("### Insights")
+    st.markdown(render_review_insight(insight), unsafe_allow_html=True)
 
     st.markdown(f"### **Top {TOP_K} Retrieved Context Reviews**")
     

@@ -8,6 +8,19 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from sklearn.feature_extraction.text import TfidfVectorizer
 
+try:
+    from ai.insight_format import (
+        REVIEW_ANALYST_PROMPT,
+        normalise_review_insight,
+        render_review_insight,
+    )
+except ModuleNotFoundError:
+    from insight_format import (
+        REVIEW_ANALYST_PROMPT,
+        normalise_review_insight,
+        render_review_insight,
+    )
+
 st.set_page_config(
     page_title="Zomato Reviews Dashboard",
     layout="wide",
@@ -80,6 +93,37 @@ st.markdown("""
         margin: 16px 0 24px 0;
         font-size: 1.05rem;
         line-height: 1.65;
+    }
+    .answer-summary {
+        margin: 0;
+        font-size: 1.06rem;
+        font-weight: 500;
+    }
+    .insight-findings {
+        display: grid;
+        gap: 10px;
+        margin-top: 16px;
+    }
+    .insight-finding {
+        border-top: 1px solid rgba(128, 128, 128, 0.18);
+        padding-top: 12px;
+    }
+    .insight-finding p, .insight-note, .insight-next {
+        margin: 5px 0;
+    }
+    .finding-title {
+        font-weight: 650;
+    }
+    .finding-label, .insight-note span, .insight-next span {
+        display: inline-block;
+        min-width: 112px;
+        color: #7b2630;
+        font-weight: 600;
+    }
+    .insight-note, .insight-next {
+        border-top: 1px solid rgba(128, 128, 128, 0.18);
+        padding-top: 12px;
+        margin-top: 14px;
     }
     
     .review-card {
@@ -195,22 +239,6 @@ Output contract:
 {SCHEMA}
 """
 
-REVIEW_ANALYST_PROMPT = """
-You are a senior Voice-of-Customer analyst for Zomato. Produce an evidence-grounded, executive-ready answer using only the retrieved customer reviews supplied in the user message.
-
-Evidence standards:
-- Treat the retrieved reviews as a small relevance-ranked sample, not as the complete customer population. Never claim platform-wide prevalence, causation, or statistical significance from this sample.
-- Separate direct evidence from interpretation. Quote or precisely paraphrase only what the supplied reviews support, and do not invent restaurants, cities, incidents, counts, trends, or customer motives.
-- Reconcile mixed evidence. If sentiment or themes conflict, state that nuance rather than forcing a single conclusion.
-- If the evidence is insufficient, say exactly what is missing and give the most useful next question or data cut. Do not fill gaps with general knowledge.
-
-Response quality:
-- Lead with a one- or two-sentence executive takeaway that directly answers the question.
-- Follow with 2–4 concise findings. For each finding, identify the theme, the supporting review signal, and its customer or operational implication.
-- When appropriate, end with one clearly-labelled recommended action that is proportional to the evidence. Phrase it as a hypothesis to validate, not a proven fact.
-- Use professional, neutral language and readable Markdown bullets. Keep the response focused; avoid repeating the retrieved reviews verbatim or exposing internal retrieval scores.
-"""
-
 def get_database_connection():
     if not os.path.exists(DATABASE_FILE):
         raise FileNotFoundError(
@@ -256,21 +284,29 @@ def find_similar_reviews(question, df, vectorizer, matrix, top_k=TOP_K):
     return result
 
 def ask_rag_llm(question, top_reviews, temperature=TEMPERATURE):
-    context = ""
-    for _, row in top_reviews.iterrows():
-        context += f"• [{row['city']} | {row['rating']}★]: {row['comment']}\n"
+    context_parts = []
+    for position, (_, row) in enumerate(top_reviews.iterrows(), start=1):
+        context_parts.append(
+            f"Review {position}\nCity: {row['city']}\nRating: {row['rating']} out of 5\n"
+            f"Comment: {row['comment']}"
+        )
 
-    user_prompt = f"Question: {question}\n\nCustomer Reviews Context:\n{context}"
+    user_prompt = (
+        f"Question: {question}\n\nRetrieved customer reviews begin\n"
+        + "\n\n".join(context_parts)
+        + "\nRetrieved customer reviews end"
+    )
 
     response = get_llm_client().chat.completions.create(
         model=CHAT_MODEL,
         temperature=temperature,
+        response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": REVIEW_ANALYST_PROMPT},
             {"role": "user", "content": user_prompt}
         ]
     )
-    return response.choices[0].message.content
+    return normalise_review_insight(response.choices[0].message.content)
 
 def generate_sql(question):
     response = get_llm_client().chat.completions.create(
@@ -396,14 +432,10 @@ with nav_tabs[0]:
             top_reviews = find_similar_reviews(
                 question_rag, review_df, review_vectorizer, review_matrix, top_k=TOP_K
             )
-            answer = ask_rag_llm(question_rag, top_reviews, temperature=TEMPERATURE)
+            insight = ask_rag_llm(question_rag, top_reviews, temperature=TEMPERATURE)
 
-        st.markdown("### **AI Insights**")
-        st.markdown(f"""
-        <div class="answer-card">
-            {answer}
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown("### Insights")
+        st.markdown(render_review_insight(insight), unsafe_allow_html=True)
 
         st.markdown(f"### **Top {TOP_K} Retrieved Context Reviews**")
         
