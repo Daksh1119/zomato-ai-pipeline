@@ -128,15 +128,6 @@ st.markdown("""
         font-weight: 600;
         text-transform: uppercase;
     }
-    .badge-score {
-        background: rgba(40, 167, 69, 0.15);
-        color: #28a745;
-        border: 1px solid rgba(40, 167, 69, 0.3);
-        padding: 3px 9px;
-        border-radius: 20px;
-        font-size: 0.75rem;
-        font-weight: 600;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -287,14 +278,13 @@ if question:
     st.markdown("### Insights")
     st.markdown(render_review_insight(insight), unsafe_allow_html=True)
 
-    st.markdown(f"### **Top {TOP_K} Retrieved Context Reviews**")
+    st.markdown("### Review sample used for this answer")
     
     tab_cards, tab_table = st.tabs(["Visual Cards", "Data Table"])
     
     with tab_cards:
         for idx, row in top_reviews.iterrows():
             rating_stars = "★" * int(row.get('rating', 0)) + "☆" * (5 - int(row.get('rating', 0)))
-            sim_score = row.get('score', 0.0) * 100
             
             st.markdown(f"""
             <div class="review-card">
@@ -304,7 +294,6 @@ if question:
                         <span style="color: #f5a623; font-weight: 700; margin-left: 10px; font-size: 1.05rem;">{rating_stars}</span>
                         <span style="opacity: 0.7; font-size: 0.85rem; margin-left: 5px;">({row.get('rating')} stars)</span>
                     </div>
-                    <span class="badge-score">Match: {sim_score:.1f}%</span>
                 </div>
                 <div style="font-size: 0.95rem; line-height: 1.5; opacity: 0.92;">
                     "{row.get('comment', '')}"
@@ -313,14 +302,12 @@ if question:
             """, unsafe_allow_html=True)
             
     with tab_table:
-        display_df = top_reviews[['city', 'rating', 'comment', 'score']].copy()
-        display_df['similarity'] = (display_df['score'] * 100).map("{:.1f}%".format)
+        display_df = top_reviews[['city', 'rating', 'comment']].copy()
         st.dataframe(
-            display_df[['city', 'rating', 'similarity', 'comment']],
+            display_df,
             column_config={
                 "city": st.column_config.TextColumn("City"),
                 "rating": st.column_config.NumberColumn("Rating ★", format="%d ★"),
-                "similarity": st.column_config.TextColumn("Similarity"),
                 "comment": st.column_config.TextColumn("Customer Review", width="large")
             },
             hide_index=True,
