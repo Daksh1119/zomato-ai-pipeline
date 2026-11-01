@@ -2,7 +2,7 @@
 
 [![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://zomato-ai-pipeline.streamlit.app)
 
-An end-to-end batch data pipeline built on Snowflake, Apache Airflow 3, dbt, and large language models. Raw food-delivery data is ingested from cloud storage, transformed through a dimensional model in Snowflake, enriched with AI-generated sentiment analysis, and exposed through a conversational analytics application.
+An end-to-end batch data pipeline built on Apache Airflow 3, DuckDB, and large language models. Airflow transforms the local food-delivery CSVs into a validated, deployable DuckDB analytics artifact, which powers a conversational analytics application without a live warehouse dependency.
 
 ---
 
@@ -14,14 +14,13 @@ An end-to-end batch data pipeline built on Snowflake, Apache Airflow 3, dbt, and
 
 ## Overview
 
-The pipeline processes seven source datasets representing the core entities of a food delivery platform — restaurants, users, menus, food items, orders, order line items, and customer reviews. Data moves through three distinct Snowflake schemas (`RAW` → `STAGING` → `MARTS`) and a dedicated `AI` schema for LLM-enriched outputs. The entire workflow is orchestrated by a daily Airflow DAG running inside Docker.
+The pipeline processes seven source datasets representing the core entities of a food delivery platform — restaurants, users, menus, food items, orders, order line items, and customer reviews. Airflow turns the CSV source layer into a compact DuckDB serving database containing the full review corpus and curated analytics marts. The entire refresh is orchestrated by a daily Airflow DAG running inside Docker.
 
 **Key engineering characteristics:**
 
-- Incremental loading with merge deduplication on `FACT_ORDERS`
-- Dimensional modelling following the Kimball methodology
-- Tag-based DAG splitting to separate core and AI-dependent build phases
-- LLM enrichment isolated in its own pipeline step with idempotent upsert logic
+- Full-refresh DuckDB artifact generation from the authoritative CSV sources
+- Atomic artifact publication so an unsuccessful refresh does not replace the last valid database
+- Post-build validation of required tables, review counts, and core serving marts
 - Retrieval-Augmented Generation (RAG) over vectorised review embeddings for conversational analytics
 - Natural-language-to-SQL translation backed by a schema-aware system prompt
 
@@ -31,10 +30,10 @@ The pipeline processes seven source datasets representing the core entities of a
 
 | Layer | Technology |
 |---|---|
-| Pipeline Warehouse | Snowflake |
+| Pipeline & Serving Store | DuckDB |
 | Dashboard Analytics Store | DuckDB (deployable serving layer) |
 | Orchestration | Apache Airflow 3 (Docker, LocalExecutor) |
-| Transformation | dbt-snowflake 1.8 |
+| Transformation | Reproducible Python + DuckDB SQL builder |
 | LLM Inference | Groq API (OpenAI-compatible, `openai/gpt-oss-20b`) |
 | Review Retrieval | TF-IDF bi-gram index (`scikit-learn`) |
 | Analytics Artifact | Compact DuckDB database (~15 MB from local source data) |
@@ -50,10 +49,10 @@ The pipeline processes seven source datasets representing the core entities of a
 ```
 zomato-de-pipeline/
 ├── airflow/
-│   ├── Dockerfile                  # Custom Airflow 3 image with providers and dbt venv
+│   ├── Dockerfile                  # Custom Airflow 3 image with DuckDB
 │   ├── docker-compose.yaml         # Services: postgres, airflow-init, apiserver, scheduler, dag-processor
 │   └── dags/
-│       └── zomato_batch.py         # Primary orchestration DAG (daily schedule)
+│       └── zomato_batch.py         # DuckDB refresh and validation DAG (daily schedule)
 │
 ├── zomato/                         # dbt project root
 │   ├── dbt_project.yml             # Project config: materialization defaults, schema targets
@@ -87,11 +86,12 @@ zomato-de-pipeline/
 │   ├── rag_chat.py                 # Standalone RAG Streamlit application (per-app entrypoint)
 │   ├── text_to_sql.py              # Standalone Text-to-SQL Streamlit application
 │   ├── app.py                      # Unified multi-tab Streamlit hub
-│   ├── build_analytics_db.py       # Builds the deployable DuckDB serving layer from CSVs
+│   ├── build_analytics_db.py       # Atomically builds the serving layer from CSVs
+│   ├── validate_analytics_db.py    # Checks the artifact after every Airflow refresh
 │   └── zomato_analytics.duckdb     # Compact analytics artifact used by Streamlit
 │   └── requirements.txt            # Python dependencies for AI layer
 │
-├── data/                           # Source CSVs (git-ignored; loaded to Snowflake stage)
+├── data/                           # Authoritative source CSVs (mounted read-only into Airflow)
 ├── architecture.png                # End-to-end pipeline diagram
 ├── requirements.txt                # Root-level requirements for Streamlit Cloud
 ├── app.py                          # Root entrypoint that delegates to ai/app.py
@@ -99,6 +99,10 @@ zomato-de-pipeline/
 ```
 
 ---
+
+## Historical Snowflake/dbt Design (legacy reference)
+
+The sections below document the original Snowflake/dbt implementation. They are retained as project history and are not invoked by the active Docker Compose stack or the `zomato_duckdb_refresh` DAG.
 
 ## Data Pipeline: Stage-by-Stage
 
@@ -217,20 +221,20 @@ The deliberate tag-based split prevents this mart from being attempted during `d
 
 ## Orchestration — Apache Airflow 3
 
-### DAG: `zomato_batch`
+### Current DAG: `zomato_duckdb_refresh`
 
 ```
-reload_raw  >>  dbt_build_core  >>  enrich_reviews  >>  dbt_build_ai
+CSV source files (read-only mount)
+    >> build_duckdb_serving_layer
+    >> validate_duckdb_serving_layer
 ```
 
 | Task | Operator | Description |
 |---|---|---|
-| `reload_raw` | `SQLExecuteQueryOperator` | Issues COPY INTO for all 7 raw tables via `snowflake_default` connection |
-| `dbt_build_core` | `BashOperator` | Runs `dbt build --exclude tag:ai` inside the container's dbt venv |
-| `enrich_reviews` | `BashOperator` | Executes `python /opt/airflow/ai/enrich_reviews.py` |
-| `dbt_build_ai` | `BashOperator` | Runs `dbt build --select tag:ai` to build `MART_REVIEW_INSIGHTS` |
+| `build_duckdb_serving_layer` | `BashOperator` | Runs `build_analytics_db.py` against `/opt/airflow/data` and atomically publishes `ai/zomato_analytics.duckdb`. |
+| `validate_duckdb_serving_layer` | `BashOperator` | Opens the published database read-only and verifies its required tables, full review count, and city/day mart. |
 
-**Schedule**: `@daily`, `catchup=False` — runs once per calendar day, does not backfill missed runs.
+**Schedule**: `@daily`, `catchup=False` — runs once per calendar day, does not backfill missed runs. The application consumes the completed artifact; it does not query Airflow or any warehouse at request time.
 
 ### Airflow 3 Architecture
 
@@ -247,18 +251,13 @@ Inter-component communication uses JWT-signed requests. The `AIRFLOW__CORE__EXEC
 
 ### Custom Docker Image
 
-dbt is installed in an isolated Python virtual environment (`/opt/airflow/dbt_venv`) to avoid dependency conflicts with Airflow's pinned packages:
+The Airflow image contains only the required DuckDB runtime plus the FAB provider for the local UI login. This removes warehouse credentials, Snowflake provider packages, dbt, and LLM credentials from the orchestrator:
 
 ```dockerfile
-FROM apache/airflow:3.0.3
+FROM apache/airflow:3.0.3-python3.11
 RUN pip install --no-cache-dir \
-      apache-airflow-providers-snowflake \
-      apache-airflow-providers-fab \
-      openai \
-      python-dotenv
-
-RUN python -m venv /opt/airflow/dbt_venv && \
-    /opt/airflow/dbt_venv/bin/pip install --no-cache-dir "dbt-snowflake==1.8.*"
+      apache-airflow-providers-fab
+RUN PIP_CONSTRAINT= pip install --no-deps "duckdb==1.1.3"
 ```
 
 ---
@@ -291,7 +290,7 @@ A natural-language-to-SQL interface against a compact DuckDB serving layer.
 
 ---
 
-## Snowflake Schema Design
+## Snowflake Schema Design (legacy reference)
 
 ```
 ZOMATO (database)
@@ -309,7 +308,6 @@ ZOMATO (database)
 
 - Docker Desktop
 - Python 3.11+
-- A Snowflake account with a warehouse, database, and a role with `CREATE SCHEMA`, `CREATE TABLE`, and `COPY INTO` privileges
 - A Groq API key ([console.groq.com](https://console.groq.com))
 - Git
 
@@ -322,61 +320,11 @@ git clone https://github.com/Daksh1119/zomato-de-pipeline.git
 cd zomato-de-pipeline
 ```
 
-### 2. Configure Snowflake
+### 2. Supply the Source Data
 
-In your Snowflake account, run the following setup script:
+Place the seven CSV source files in `data/`. Airflow mounts this directory read-only, so the source data remains the system of record while each run writes only the derived `ai/zomato_analytics.duckdb` artifact.
 
-```sql
-CREATE DATABASE IF NOT EXISTS ZOMATO;
-CREATE WAREHOUSE IF NOT EXISTS ZOMATO_WH WAREHOUSE_SIZE = 'X-SMALL' AUTO_SUSPEND = 60;
-CREATE ROLE IF NOT EXISTS DBT_ROLE;
-
-CREATE SCHEMA IF NOT EXISTS ZOMATO.RAW;
-CREATE SCHEMA IF NOT EXISTS ZOMATO.STAGING;
-CREATE SCHEMA IF NOT EXISTS ZOMATO.MARTS;
-
-GRANT USAGE ON WAREHOUSE ZOMATO_WH TO ROLE DBT_ROLE;
-GRANT ALL ON DATABASE ZOMATO TO ROLE DBT_ROLE;
-GRANT ALL ON ALL SCHEMAS IN DATABASE ZOMATO TO ROLE DBT_ROLE;
-
--- Create internal stage for CSV ingestion
-USE SCHEMA ZOMATO.RAW;
-CREATE STAGE IF NOT EXISTS ZOMATO_RAW_STAGE;
-```
-
-Upload the source CSVs to the stage, partitioned by folder:
-
-```bash
-# Using SnowSQL
-PUT file://data/orders.csv       @ZOMATO.RAW.ZOMATO_RAW_STAGE/orders/
-PUT file://data/order_items.csv  @ZOMATO.RAW.ZOMATO_RAW_STAGE/order_items/
-PUT file://data/restaurants.csv  @ZOMATO.RAW.ZOMATO_RAW_STAGE/restaurants/
-PUT file://data/users.csv        @ZOMATO.RAW.ZOMATO_RAW_STAGE/users/
-PUT file://data/food.csv         @ZOMATO.RAW.ZOMATO_RAW_STAGE/food/
-PUT file://data/menu.csv         @ZOMATO.RAW.ZOMATO_RAW_STAGE/menu/
-PUT file://data/reviews.csv      @ZOMATO.RAW.ZOMATO_RAW_STAGE/reviews/
-```
-
-Create the raw table definitions that match the source CSV schemas before running `COPY INTO`.
-
-### 3. Configure Environment Variables
-
-Create an `.env` file in the `airflow/` directory. Use the example below as a template:
-
-```bash
-cp airflow/.env.example airflow/.env
-```
-
-**`airflow/.env.example`:**
-
-```dotenv
-SNOWFLAKE_ACCOUNT=your_account_identifier
-SNOWFLAKE_USER=your_username
-SNOWFLAKE_PASSWORD=your_password
-GROQ_API_KEY=gsk_your_groq_api_key
-OPENAI_API_KEY=
-SAMPLE_N=500
-```
+### 3. Configure the Dashboard Key
 
 Create an `.env` file in `ai/` for local Streamlit development:
 
@@ -400,24 +348,9 @@ docker compose up -d
 
 Wait for `airflow-init` to complete (approximately 60 seconds), then access the Airflow UI at [http://localhost:8080](http://localhost:8080) with credentials `admin / admin`.
 
-In the Airflow UI:
+In the Airflow UI, enable and trigger `zomato_duckdb_refresh`. A healthy run completes both build and validation tasks. No Snowflake connection or Airflow secret is required.
 
-1. Navigate to **Admin → Connections**.
-2. Confirm that `snowflake_default` is present (it is auto-configured via the `AIRFLOW_CONN_SNOWFLAKE_DEFAULT` environment variable in `docker-compose.yaml`).
-3. Enable and trigger the `zomato_batch` DAG.
-
-### 5. Run the dbt Project Locally (Optional)
-
-```bash
-cd zomato
-pip install dbt-snowflake==1.8.*
-
-# Create profiles.yml (git-ignored) at zomato/profiles.yml
-dbt debug           # verify connection
-dbt build           # run all models and tests
-```
-
-### 6. Run the Streamlit Application Locally
+### 5. Run the Streamlit Application Locally
 
 ```bash
 pip install -r requirements.txt

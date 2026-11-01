@@ -44,6 +44,8 @@ dbt_packages/
 # Airflow
 airflow/logs/
 airflow/pgdata/
+airflow/vendor/*
+!airflow/vendor/.gitkeep
 
 # IDE & OS
 .vscode/

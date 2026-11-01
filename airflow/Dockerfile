@@ -1,14 +1,14 @@
-# Airflow 3.x image + Snowflake provider + FAB auth (for admin/admin login) + dbt venv + openai.
-# Bump the tag to the newest 3.x if you like (e.g. 3.0.4 / 3.1.x).
-FROM apache/airflow:3.0.3
+# Airflow 3.x image + DuckDB + FAB auth (for admin/admin login).
+FROM apache/airflow:3.0.3-python3.11
 
-# Providers: snowflake (COPY task), fab (classic username/password login), openai (AI task), python-dotenv.
-RUN pip install --no-cache-dir \
-      apache-airflow-providers-snowflake \
-      apache-airflow-providers-fab \
-      openai \
-      python-dotenv
-
-# dbt in its own venv so it never clashes with Airflow's deps. DAG calls /opt/airflow/dbt_venv/bin/dbt
-RUN python -m venv /opt/airflow/dbt_venv && \
-    /opt/airflow/dbt_venv/bin/pip install --no-cache-dir "dbt-snowflake==1.8.*"
+# DuckDB is a self-contained wheel. Airflow's constraints file omits it, so
+# install it without dependency resolution after the constrained provider.
+# A locally cached Linux wheel is optional (and git-ignored) for slow or
+# offline Docker networks; fresh clones use PyPI as usual.
+COPY vendor/ /tmp/duckdb-wheel/
+RUN pip install --no-cache-dir apache-airflow-providers-fab && \
+    if find /tmp/duckdb-wheel -name '*.whl' -print -quit | grep -q .; then \
+        PIP_CONSTRAINT= pip install --no-deps /tmp/duckdb-wheel/*.whl; \
+    else \
+        PIP_CONSTRAINT= pip install --no-deps --retries 5 --resume-retries 5 --timeout 120 "duckdb==1.1.3"; \
+    fi

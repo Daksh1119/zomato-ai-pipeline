@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from uuid import uuid4
 
 import duckdb
 
@@ -31,11 +32,16 @@ def build_database(data_dir: Path, output_path: Path) -> None:
         raise FileNotFoundError(f"Missing source CSV files in {data_dir}: {missing_list}")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    if output_path.exists():
-        output_path.unlink()
+    # A unique sibling file makes the builder safe even if an operator
+    # accidentally starts a second run while the DAG-level concurrency guard
+    # is in effect. Only a completed build replaces the published artifact.
+    staging_path = output_path.with_name(f"{output_path.name}.{uuid4().hex}.building")
 
-    con = duckdb.connect(str(output_path))
+    # Build beside the active artifact and publish only after a successful
+    # checkpoint. This prevents a failed scheduled run from breaking Streamlit.
+    con = None
     try:
+        con = duckdb.connect(str(staging_path))
         orders = sql_path(data_dir / "orders.csv")
         reviews = sql_path(data_dir / "reviews.csv")
         users = sql_path(data_dir / "users.csv")
@@ -237,8 +243,17 @@ def build_database(data_dir: Path, output_path: Path) -> None:
         con.execute("DROP VIEW source_users")
         con.execute("CREATE TABLE app_metadata AS SELECT COUNT(*) AS total_reviews FROM reviews")
         con.execute("CHECKPOINT")
-    finally:
+    except Exception:
+        # Keep the previous published artifact available to Streamlit and avoid
+        # a stale staging file blocking the next scheduled Airflow run.
+        if con is not None:
+            con.close()
+        staging_path.unlink(missing_ok=True)
+        raise
+    else:
+        assert con is not None
         con.close()
+        staging_path.replace(output_path)
 
 
 def main() -> None:
