@@ -13,12 +13,14 @@ try:
         normalise_review_insight,
         render_review_insight,
     )
+    from ai.review_queries import build_city_catalog, requests_city_catalog
 except ModuleNotFoundError:
     from insight_format import (
         REVIEW_ANALYST_PROMPT,
         normalise_review_insight,
         render_review_insight,
     )
+    from review_queries import build_city_catalog, requests_city_catalog
 
 st.set_page_config(
     page_title="Zomato Review Intelligence",
@@ -271,45 +273,61 @@ question = st.text_input(
 )
 
 if question:
-    with st.spinner("Searching semantic vectors and synthesizing insights with Groq..."):
-        top_reviews = find_similar_reviews(question, review_df, top_k=TOP_K)
-        insight = ask_llm(question, top_reviews, temperature=TEMPERATURE)
-
-    st.markdown("### Insights")
-    st.markdown(render_review_insight(insight), unsafe_allow_html=True)
-
-    st.markdown("### Review sample used for this answer")
-    
-    tab_cards, tab_table = st.tabs(["Visual Cards", "Data Table"])
-    
-    with tab_cards:
-        for idx, row in top_reviews.iterrows():
-            rating_stars = "★" * int(row.get('rating', 0)) + "☆" * (5 - int(row.get('rating', 0)))
-            
-            st.markdown(f"""
-            <div class="review-card">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                    <div>
-                        <span class="badge-city">{row.get('city', 'Unknown')}</span>
-                        <span style="color: #f5a623; font-weight: 700; margin-left: 10px; font-size: 1.05rem;">{rating_stars}</span>
-                        <span style="opacity: 0.7; font-size: 0.85rem; margin-left: 5px;">({row.get('rating')} stars)</span>
-                    </div>
-                </div>
-                <div style="font-size: 0.95rem; line-height: 1.5; opacity: 0.92;">
-                    "{row.get('comment', '')}"
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-    with tab_table:
-        display_df = top_reviews[['city', 'rating', 'comment']].copy()
+    if requests_city_catalog(question):
+        city_catalog = build_city_catalog(review_df)
+        st.markdown("### Cities in the full review corpus")
+        st.caption(
+            f"{len(city_catalog):,} distinct cities are represented across all indexed reviews."
+        )
         st.dataframe(
-            display_df,
+            city_catalog,
             column_config={
                 "city": st.column_config.TextColumn("City"),
-                "rating": st.column_config.NumberColumn("Rating ★", format="%d ★"),
-                "comment": st.column_config.TextColumn("Customer Review", width="large")
+                "review_count": st.column_config.NumberColumn("Reviews", format="%d"),
             },
             hide_index=True,
-            use_container_width=True
+            use_container_width=True,
         )
+    else:
+        with st.spinner("Searching semantic vectors and synthesizing insights with Groq..."):
+            top_reviews = find_similar_reviews(question, review_df, top_k=TOP_K)
+            insight = ask_llm(question, top_reviews, temperature=TEMPERATURE)
+
+        st.markdown("### Insights")
+        st.markdown(render_review_insight(insight), unsafe_allow_html=True)
+
+        st.markdown("### Review sample used for this answer")
+
+        tab_cards, tab_table = st.tabs(["Visual Cards", "Data Table"])
+
+        with tab_cards:
+            for idx, row in top_reviews.iterrows():
+                rating_stars = "★" * int(row.get('rating', 0)) + "☆" * (5 - int(row.get('rating', 0)))
+
+                st.markdown(f"""
+                <div class="review-card">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <div>
+                            <span class="badge-city">{row.get('city', 'Unknown')}</span>
+                            <span style="color: #f5a623; font-weight: 700; margin-left: 10px; font-size: 1.05rem;">{rating_stars}</span>
+                            <span style="opacity: 0.7; font-size: 0.85rem; margin-left: 5px;">({row.get('rating')} stars)</span>
+                        </div>
+                    </div>
+                    <div style="font-size: 0.95rem; line-height: 1.5; opacity: 0.92;">
+                        "{row.get('comment', '')}"
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        with tab_table:
+            display_df = top_reviews[['city', 'rating', 'comment']].copy()
+            st.dataframe(
+                display_df,
+                column_config={
+                    "city": st.column_config.TextColumn("City"),
+                    "rating": st.column_config.NumberColumn("Rating ★", format="%d ★"),
+                    "comment": st.column_config.TextColumn("Customer Review", width="large")
+                },
+                hide_index=True,
+                use_container_width=True
+            )
