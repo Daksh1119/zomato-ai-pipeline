@@ -14,6 +14,7 @@ try:
         normalise_review_insight,
         render_review_insight,
     )
+    from ai.input_guardrails import blocked_input_message
     from ai.review_queries import build_city_catalog, requests_city_catalog
 except ModuleNotFoundError:
     from insight_format import (
@@ -21,6 +22,7 @@ except ModuleNotFoundError:
         normalise_review_insight,
         render_review_insight,
     )
+    from input_guardrails import blocked_input_message
     from review_queries import build_city_catalog, requests_city_catalog
 
 st.set_page_config(
@@ -421,7 +423,10 @@ with nav_tabs[0]:
         )
 
     if st.session_state.reviews_ready and question_rag:
-        if requests_city_catalog(question_rag):
+        guardrail_message = blocked_input_message(question_rag)
+        if guardrail_message:
+            st.warning(guardrail_message)
+        elif requests_city_catalog(question_rag):
             city_catalog = build_city_catalog(review_df)
             st.markdown("### Cities in the full review corpus")
             st.caption(
@@ -513,25 +518,29 @@ with nav_tabs[1]:
     )
 
     if question_sql:
-        with st.spinner("Generating DuckDB SQL with Groq..."):
-            sql = generate_sql(question_sql)
-        
-        st.markdown("##### **Generated SQL Query**")
-        st.code(sql, language="sql")
-
-        if not is_safe_sql(sql):
-            st.error("The generated SQL is not safe to run (data modifications are prohibited).")
+        guardrail_message = blocked_input_message(question_sql)
+        if guardrail_message:
+            st.warning(guardrail_message)
         else:
-            try:
-                with st.spinner("Running query on DuckDB..."):
-                    df_sql = run_sql_query(sql)
-                st.success(f"Returned {len(df_sql)} rows")
-                st.dataframe(df_sql, hide_index=True, use_container_width=True)
+            with st.spinner("Generating DuckDB SQL with Groq..."):
+                sql = generate_sql(question_sql)
 
-                if len(df_sql.columns) == 2 and pd.api.types.is_numeric_dtype(df_sql.iloc[:, 1]):
-                    st.markdown("<div style='height: 2rem;'></div>", unsafe_allow_html=True)
-                    st.markdown("#### Visual summary")
-                    st.bar_chart(df_sql, x=df_sql.columns[0], y=df_sql.columns[1])
+            st.markdown("##### **Generated SQL Query**")
+            st.code(sql, language="sql")
 
-            except Exception as e:
-                st.error(f"Error running DuckDB query: {e}")
+            if not is_safe_sql(sql):
+                st.error("The generated SQL is not safe to run (data modifications are prohibited).")
+            else:
+                try:
+                    with st.spinner("Running query on DuckDB..."):
+                        df_sql = run_sql_query(sql)
+                    st.success(f"Returned {len(df_sql)} rows")
+                    st.dataframe(df_sql, hide_index=True, use_container_width=True)
+
+                    if len(df_sql.columns) == 2 and pd.api.types.is_numeric_dtype(df_sql.iloc[:, 1]):
+                        st.markdown("<div style='height: 2rem;'></div>", unsafe_allow_html=True)
+                        st.markdown("#### Visual summary")
+                        st.bar_chart(df_sql, x=df_sql.columns[0], y=df_sql.columns[1])
+
+                except Exception as e:
+                    st.error(f"Error running DuckDB query: {e}")

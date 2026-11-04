@@ -13,6 +13,7 @@ try:
         normalise_review_insight,
         render_review_insight,
     )
+    from ai.input_guardrails import blocked_input_message
     from ai.review_queries import build_city_catalog, requests_city_catalog
 except ModuleNotFoundError:
     from insight_format import (
@@ -20,6 +21,7 @@ except ModuleNotFoundError:
         normalise_review_insight,
         render_review_insight,
     )
+    from input_guardrails import blocked_input_message
     from review_queries import build_city_catalog, requests_city_catalog
 
 st.set_page_config(
@@ -273,7 +275,10 @@ question = st.text_input(
 )
 
 if question:
-    if requests_city_catalog(question):
+    guardrail_message = blocked_input_message(question)
+    if guardrail_message:
+        st.warning(guardrail_message)
+    elif requests_city_catalog(question):
         city_catalog = build_city_catalog(review_df)
         st.markdown("### Cities in the full review corpus")
         st.caption(
